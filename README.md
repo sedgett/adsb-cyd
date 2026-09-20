@@ -4,6 +4,14 @@ A real-time aircraft radar display for the **ESP32-2432S028** (aka "Cheap Yellow
 
 No PSRAM required. No LVGL. Just direct TFT_eSPI rendering on a $15 board.
 
+## Simon's Edits
+
+- Updated calibration and rotation as CYD clone has touch interface rotated
+- Tweaks to radar display inlcuding adding 2nm option and setting default to 5nm
+- Added config.h to .gitignore to avoid uploading wifi credentials
+- Fixed user agent bug here API blocked w default useragent
+
+
 ## Features
 
 - **Radar view** — sweeping radar with aircraft blips, trails, heading lines, and sweep-based fading
