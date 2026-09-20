@@ -9,6 +9,8 @@
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 
+static constexpr const char *USER_AGENT = "adsb-cyd/1.0";
+
 static volatile NetType _active_net = NET_NONE;
 
 static AircraftList *_aircraft_list = nullptr;
@@ -249,11 +251,33 @@ static void fetch_task(void *param) {
                 HTTPClient http;
                 http.begin(client, url);
                 http.setTimeout(10000);
+                http.setUserAgent(USER_AGENT);
+                static const char *resp_hdrs[] = {"Server", "Content-Type", "X-Ratelimit-Limit", "X-Ratelimit-Remaining", "Retry-After", "Vary", "Allow"};
+                http.collectHeaders(resp_hdrs, 7);
                 uint32_t t0 = millis();
                 int httpCode = http.GET();
                 Serial.printf("Fetch: HTTP %d, %lums, heap=%lu\n",
                     httpCode, (unsigned long)(millis() - t0),
                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+                if (httpCode != HTTP_CODE_OK) {
+                    // Debug: log response headers and body for non-200
+                    Serial.printf("  URL: %s\n", url);
+                    Serial.printf("  User-Agent: %s\n", USER_AGENT);
+                    Serial.printf("  Status: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+                    int clen = http.getSize();
+                    Serial.printf("  Content-Length: %d\n", clen);
+                    // Log response headers
+                    for (int i = 0; i < http.headers(); i++) {
+                        Serial.printf("  HDR: %s: %s\n", http.headerName(i).c_str(), http.header(i).c_str());
+                    }
+                    // Log first 256 bytes of response body
+                    if (clen != 0) {
+                        String body = http.getString();
+                        int show = body.length() > 256 ? 256 : body.length();
+                        Serial.printf("  Body (%d/%d): %.*s\n", show, body.length(), show, body.c_str());
+                    }
+                }
 
                 if (httpCode == HTTP_CODE_OK) {
                     _fstats.last_fetch_ms = millis() - t0;
@@ -383,7 +407,12 @@ static void route_enrich_task(void *param) {
             HTTPClient http;
             http.begin(client, url);
             http.setTimeout(8000);
+            http.setUserAgent(USER_AGENT);
             int code = http.GET();
+
+            if (code != HTTP_CODE_OK) {
+                Serial.printf("Route enrich: HTTP %d for %s\n", code, url);
+            }
 
             if (code == HTTP_CODE_OK) {
                 WiFiClient *stream = http.getStreamPtr();

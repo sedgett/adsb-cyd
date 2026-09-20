@@ -7,7 +7,6 @@
 // Home location
 #define HOME_LAT 30.6905
 #define HOME_LON -88.1632
-
 // ADS-B settings — reduced for CYD (no PSRAM, 320KB DRAM)
 #define ADSB_RADIUS_NM 75
 #define ADSB_POLL_INTERVAL_MS 5000

@@ -8,6 +8,7 @@
 #include <cstring>
 
 #define MAX_CACHE 10
+static constexpr const char *USER_AGENT = "adsb-cyd/1.0";
 
 static AircraftEnrichment _cache[MAX_CACHE];
 static char _cache_keys[MAX_CACHE][7];
@@ -64,6 +65,7 @@ static void fetch_task(void *param) {
         HTTPClient http;
         http.begin(client, url);
         http.setTimeout(5000);
+        http.setUserAgent(USER_AGENT);
         if (http.GET() == HTTP_CODE_OK) {
             String payload = http.getString();
             JsonDocument doc;
@@ -90,6 +92,7 @@ static void fetch_task(void *param) {
         HTTPClient http;
         http.begin(client, url);
         http.setTimeout(5000);
+        http.setUserAgent(USER_AGENT);
         if (http.GET() == HTTP_CODE_OK) {
             String payload = http.getString();
             JsonDocument doc;
@@ -122,6 +125,7 @@ static void fetch_task(void *param) {
         HTTPClient http;
         http.begin(client, url);
         http.setTimeout(5000);
+        http.setUserAgent(USER_AGENT);
         if (http.GET() == HTTP_CODE_OK) {
             String payload = http.getString();
             JsonDocument doc;

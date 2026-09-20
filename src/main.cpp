@@ -108,9 +108,9 @@ static const ColorPalette *pal = &PALETTE_GREEN;
 #define RADAR_R   (RADAR_H / 2 - 4)
 
 // Range options (nm)
-static const float RANGES[] = {150, 100, 50, 20, 5};
-static const int NUM_RANGES = 5;
-static int range_idx = 1;
+static const float RANGES[] = {150, 100, 50, 20, 5, 2};
+static const int NUM_RANGES = 6;
+static int range_idx = 4;  // default 5nm
 
 // ---- View state ----
 
@@ -121,29 +121,11 @@ static int detail_idx = 0;
 
 // Sweep
 static float sweep_angle = 0;
-static float prev_sweep_angle = -1;
 #define SWEEP_SPEED 3.0f
 
-// ---- Differential rendering ----
+// ---- Radar rendering ----
 
-struct BlipState {
-    int16_t x, y;
-    int16_t hx, hy;
-    uint8_t r;
-    bool has_heading;
-    bool has_label;
-};
-static BlipState prev_blips[MAX_AIRCRAFT];
-static int prev_blip_count = 0;
 static bool radar_needs_full_redraw = true;
-
-struct TrailState {
-    int16_t x[TRAIL_LENGTH];
-    int16_t y[TRAIL_LENGTH];
-    uint8_t count;
-};
-static TrailState prev_trails[MAX_AIRCRAFT];
-static int prev_trail_count = 0;
 
 // ---- Auto-cycle ----
 
@@ -214,7 +196,7 @@ static const char *SETTINGS_LABELS[] = {
 };
 static const int CYCLE_INTERVALS[] = {15, 30, 60, 90};
 static const int INACTIVITY_VALS[] = {30, 60, 120};
-#define LONG_PRESS_MS 1000
+#define LONG_PRESS_MS 600
 
 // ---- Helpers ----
 
@@ -259,6 +241,97 @@ static uint16_t touchRead16(uint8_t cmd) {
     return val >> 3;
 }
 
+// Read raw touch (no calibration, no mapping)
+static bool readRawTouch(uint16_t &rawX, uint16_t &rawY) {
+    if (digitalRead(XPT2046_IRQ) != LOW) return false;
+    uint32_t sumX = 0, sumY = 0;
+    for (int i = 0; i < 8; i++) {
+        sumX += touchRead16(0xD0);
+        sumY += touchRead16(0x90);
+    }
+    rawX = sumX / 8;
+    rawY = sumY / 8;
+    return true;
+}
+
+// Touch calibration routine
+static void run_touch_calibration() {
+    Serial.println("\n=== TOUCH CALIBRATION ===");
+    Serial.println("Tap each crosshair. Hold until it turns green.");
+
+    struct CalPoint { int x; int y; const char *name; };
+    CalPoint pts[] = {
+        { 20,  20,  "TOP-LEFT" },
+        { 299, 219, "BOTTOM-RIGHT" },
+        { 160, 120, "CENTER" },
+    };
+    uint16_t rX[3], rY[3];
+
+    for (int p = 0; p < 3; p++) {
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        tft.drawString(pts[p].name, 160, 200, 2);
+        tft.drawString("Tap the crosshair", 160, 218, 1);
+        int cx = pts[p].x, cy = pts[p].y;
+        tft.drawLine(cx-20, cy, cx+20, cy, TFT_RED);
+        tft.drawLine(cx, cy-20, cx, cy+20, TFT_RED);
+        tft.drawCircle(cx, cy, 10, TFT_RED);
+
+        while (digitalRead(XPT2046_IRQ) != LOW) { delay(10); }
+        delay(100);
+        uint32_t bX=0, bY=0; int n=0;
+        uint32_t t0 = millis();
+        while (millis() - t0 < 500) {
+            uint16_t x, y;
+            if (readRawTouch(x, y)) { bX+=x; bY+=y; n++; }
+            delay(10);
+        }
+        rX[p] = bX/n; rY[p] = bY/n;
+
+        tft.drawLine(cx-20, cy, cx+20, cy, TFT_GREEN);
+        tft.drawLine(cx, cy-20, cx, cy+20, TFT_GREEN);
+        tft.drawCircle(cx, cy, 10, TFT_GREEN);
+        Serial.printf("  %s: screen(%d,%d) -> raw X=%u Y=%u\n", pts[p].name, cx, cy, rX[p], rY[p]);
+
+        while (digitalRead(XPT2046_IRQ) == LOW) { delay(10); }
+        delay(300);
+    }
+
+    Serial.println("\n--- AXIS SWAP DETECTION ---");
+    int dx_rawX = abs((int)rX[1] - (int)rX[0]);
+    int dx_rawY = abs((int)rY[1] - (int)rY[0]);
+    Serial.printf("  TL->BR: rawX delta=%d, rawY delta=%d\n", dx_rawX, dx_rawY);
+    bool swapped = (dx_rawY > dx_rawX);
+    Serial.printf("  ==> AXES %s\n", swapped ? "ARE SWAPPED (rawY=screenX, rawX=screenY)" : "ARE NORMAL (rawX=screenX, rawY=screenY)");
+
+    Serial.println("\n--- SUGGESTED CALIBRATION ---");
+    if (swapped) {
+        // tx from rawY, ty from rawX
+        Serial.printf("  // SWAPPED: tx=map(rawY,...), ty=map(rawX,...)\n");
+        if (rY[0] > rY[1])
+            Serial.printf("  TOUCH_X_MIN=%u TOUCH_X_MAX=%u\n", rY[0]+30, rY[1]-30);
+        else
+            Serial.printf("  TOUCH_X_MIN=%u TOUCH_X_MAX=%u\n", rY[0]-30, rY[1]+30);
+        if (rX[0] > rX[1])
+            Serial.printf("  TOUCH_Y_MIN=%u TOUCH_Y_MAX=%u\n", rX[0]+30, rX[1]-30);
+        else
+            Serial.printf("  TOUCH_Y_MIN=%u TOUCH_Y_MAX=%u\n", rX[0]-30, rX[1]+30);
+    } else {
+        if (rX[0] > rX[1])
+            Serial.printf("  TOUCH_X_MIN=%u TOUCH_X_MAX=%u\n", rX[0]+30, rX[1]-30);
+        else
+            Serial.printf("  TOUCH_X_MIN=%u TOUCH_X_MAX=%u\n", rX[0]-30, rX[1]+30);
+        if (rY[0] > rY[1])
+            Serial.printf("  TOUCH_Y_MIN=%u TOUCH_Y_MAX=%u\n", rY[0]+30, rY[1]-30);
+        else
+            Serial.printf("  TOUCH_Y_MIN=%u TOUCH_Y_MAX=%u\n", rY[0]-30, rY[1]+30);
+    }
+
+    Serial.println("\n=== CALIBRATION COMPLETE ===\n");
+    tft.fillScreen(TFT_BLACK);
+}
+
 static bool getTouchPoint(int &tx, int &ty) {
     if (digitalRead(XPT2046_IRQ) != LOW) return false;
     uint32_t sumX = 0, sumY = 0;
@@ -266,8 +339,11 @@ static bool getTouchPoint(int &tx, int &ty) {
         sumX += touchRead16(0xD0);
         sumY += touchRead16(0x90);
     }
-    tx = map(sumX / 4, TOUCH_X_MIN, TOUCH_X_MAX, 0, 319);
-    ty = map(sumY / 4, TOUCH_Y_MIN, TOUCH_Y_MAX, 0, 239);
+    uint16_t rawX = sumX / 4;
+    uint16_t rawY = sumY / 4;
+    // Axes swapped: rawY -> screen X, rawX -> screen Y
+    tx = map(rawY, TOUCH_X_MIN, TOUCH_X_MAX, 0, 319);
+    ty = map(rawX, TOUCH_Y_MIN, TOUCH_Y_MAX, 0, 239);
     tx = constrain(tx, 0, 319);
     ty = constrain(ty, 0, 239);
     return true;
@@ -325,9 +401,9 @@ static int arrivals_list_y = 0;
 
 // ---- Touch handlers per view ----
 
-// Touch zones: 45% left, 10% center, 45% right
-#define TOUCH_LEFT_MAX  (LCD_H_RES * 9 / 20)  // 144
-#define TOUCH_RIGHT_MIN (LCD_H_RES * 11 / 20) // 176
+// Touch zones: 30% left, 40% center, 30% right
+#define TOUCH_LEFT_MAX  (LCD_H_RES * 3 / 10)  // 96
+#define TOUCH_RIGHT_MIN (LCD_H_RES * 7 / 10)  // 224
 
 static void handle_touch_radar(int tx) {
     if (tx < TOUCH_LEFT_MAX) {
@@ -578,39 +654,29 @@ static void draw_loading() {
 
 // ---- Radar view ----
 
-static void draw_radar() {
-    if (radar_needs_full_redraw) {
-        tft.fillRect(0, RADAR_Y, LCD_H_RES, RADAR_H, pal->bg);
-        radar_needs_full_redraw = false;
-        prev_blip_count = 0;
-        prev_trail_count = 0;
-        prev_sweep_angle = -1;
-    }
+// Validate IATA code: 2-3 uppercase letters
+static bool valid_iata(const char *s) {
+    if (!s[0] || !isupper(s[0])) return false;
+    if (s[1] && !isupper(s[1])) return false;
+    return true;
+}
 
-    // Erase old sweep
-    if (prev_sweep_angle >= 0) {
-        float prad = prev_sweep_angle * M_PI / 180.0f;
-        tft.drawLine(RADAR_CX, RADAR_CY,
-            RADAR_CX + (int)(RADAR_R * sinf(prad)),
-            RADAR_CY - (int)(RADAR_R * cosf(prad)), pal->bg);
-    }
+// Previous-frame tracking for selective erase (flicker-free)
+#define MAX_PREV_BLIPS 40
+#define MAX_PREV_TRAIL_SEGS 80
 
-    // Erase old trails
-    for (int i = 0; i < prev_trail_count; i++) {
-        TrailState &t = prev_trails[i];
-        for (int j = 1; j < t.count; j++)
-            tft.drawLine(t.x[j-1], t.y[j-1], t.x[j], t.y[j], pal->bg);
-    }
+struct PrevBlip { int x, y, w, h; };
+struct PrevTrailSeg { int x1, y1, x2, y2; };
 
-    // Erase old blips
-    for (int i = 0; i < prev_blip_count; i++) {
-        BlipState &b = prev_blips[i];
-        tft.fillCircle(b.x, b.y, b.r, pal->bg);
-        if (b.has_heading) tft.drawLine(b.x, b.y, b.hx, b.hy, pal->bg);
-        if (b.has_label) tft.fillRect(b.x + 4, b.y - 12, 56, 18, pal->bg);
-    }
+static PrevBlip prev_blips[MAX_PREV_BLIPS];
+static int prev_blip_count = 0;
+static PrevTrailSeg prev_trails[MAX_PREV_TRAIL_SEGS];
+static int prev_trail_count = 0;
+static float prev_sweep_angle = -1;
+static bool radar_first_draw = true;
 
-    // Redraw static: rings + crosshair
+static void draw_radar_static() {
+    // Rings + crosshair
     for (int i = 1; i <= 3; i++) {
         int r = RADAR_R * i / 3;
         tft.drawCircle(RADAR_CX, RADAR_CY, r, pal->ring);
@@ -618,7 +684,7 @@ static void draw_radar() {
     tft.drawLine(RADAR_CX - RADAR_R, RADAR_CY, RADAR_CX + RADAR_R, RADAR_CY, pal->grid);
     tft.drawLine(RADAR_CX, RADAR_CY - RADAR_R, RADAR_CX, RADAR_CY + RADAR_R, pal->grid);
 
-    // Compass rose: N/S/E/W at ring edges
+    // Compass rose
     tft.setTextColor(pal->ring, pal->bg);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("N", RADAR_CX, RADAR_CY - RADAR_R + 6, 1);
@@ -626,115 +692,8 @@ static void draw_radar() {
     tft.drawString("E", RADAR_CX + RADAR_R - 6, RADAR_CY, 1);
     tft.drawString("W", RADAR_CX - RADAR_R + 6, RADAR_CY, 1);
 
-    // Sweep line
-    float rad = sweep_angle * M_PI / 180.0f;
-    int sx = RADAR_CX + (int)(RADAR_R * sinf(rad));
-    int sy = RADAR_CY - (int)(RADAR_R * cosf(rad));
-    tft.drawLine(RADAR_CX, RADAR_CY, sx, sy, pal->sweep);
-    prev_sweep_angle = sweep_angle;
-
     // Home dot
     tft.fillCircle(RADAR_CX, RADAR_CY, 2, pal->text);
-
-    // Aircraft
-    int new_blip_count = 0;
-    int new_trail_count = 0;
-    if (aircraft_list.lock(pdMS_TO_TICKS(50))) {
-        for (int i = 0; i < aircraft_list.count && new_blip_count < MAX_AIRCRAFT; i++) {
-            Aircraft &a = aircraft_list.aircraft[i];
-
-            // Apply filter
-            if (!aircraft_passes_filter(a)) continue;
-
-            int px, py;
-            if (!latlon_to_radar(a.lat, a.lon, px, py)) continue;
-
-            int dx = px - RADAR_CX;
-            int dy = py - RADAR_CY;
-            if (dx * dx + dy * dy > RADAR_R * RADAR_R) continue;
-
-            uint8_t opacity = compute_aircraft_opacity(a.stale_since, millis());
-            if (opacity == 0) continue;
-
-            // Trail
-            if (a.trail_count > 1 && new_trail_count < MAX_AIRCRAFT) {
-                TrailState &ts = prev_trails[new_trail_count];
-                ts.count = 0;
-                for (int t = 0; t < a.trail_count && ts.count < TRAIL_LENGTH; t++) {
-                    int tx, ty;
-                    if (latlon_to_radar(a.trail[t].lat, a.trail[t].lon, tx, ty)) {
-                        ts.x[ts.count] = tx;
-                        ts.y[ts.count] = ty;
-                        ts.count++;
-                    }
-                }
-                for (int t = 1; t < ts.count; t++)
-                    tft.drawLine(ts.x[t-1], ts.y[t-1], ts.x[t], ts.y[t], pal->trail);
-                new_trail_count++;
-            }
-
-            // Sweep-angle fade
-            float ac_angle = atan2f((float)(px - RADAR_CX), (float)(RADAR_CY - py)) * 180.0f / M_PI;
-            if (ac_angle < 0) ac_angle += 360.0f;
-            float behind = sweep_angle - ac_angle;
-            if (behind < 0) behind += 360.0f;
-
-            uint16_t fade_color;
-            if (a.is_emergency)
-                fade_color = (behind < 60) ? pal->blip_emg : pal->fade_emg_dim;
-            else if (a.is_military)
-                fade_color = (behind < 60) ? pal->blip_mil : pal->fade_mil_dim;
-            else if (behind < 60)
-                fade_color = pal->fade_bright;
-            else if (behind < 180)
-                fade_color = pal->fade_med;
-            else
-                fade_color = pal->fade_dim;
-
-            int blip_r = (a.is_military || a.is_emergency) ? 3 : 2;
-            tft.fillCircle(px, py, blip_r, fade_color);
-
-            BlipState &b = prev_blips[new_blip_count];
-            b.x = px; b.y = py; b.r = blip_r;
-            b.has_heading = false; b.has_label = false;
-
-            // Heading line
-            if (a.heading > 0 && !a.on_ground) {
-                float hrad = a.heading * M_PI / 180.0f;
-                int hx = px + (int)(8 * sinf(hrad));
-                int hy = py - (int)(8 * cosf(hrad));
-                tft.drawLine(px, py, hx, hy, fade_color);
-                b.has_heading = true; b.hx = hx; b.hy = hy;
-            }
-
-            // Labels
-            if (behind < 180) {
-                tft.setTextColor(fade_color, pal->bg);
-                tft.setTextDatum(BL_DATUM);
-                if (a.callsign[0])
-                    tft.drawString(a.callsign, px + 4, py - 2, 1);
-                if (behind < 60) {
-                    char info[16];
-                    if (a.altitude > 0)
-                        snprintf(info, sizeof(info), "%d %dk", a.altitude / 100, a.speed);
-                    else if (a.on_ground)
-                        snprintf(info, sizeof(info), "GND %dk", a.speed);
-                    else
-                        info[0] = '\0';
-                    if (info[0]) {
-                        tft.setTextDatum(TL_DATUM);
-                        tft.drawString(info, px + 4, py + 2, 1);
-                    }
-                }
-                b.has_label = true;
-            }
-
-            new_blip_count++;
-        }
-        aircraft_list.unlock();
-    }
-    prev_blip_count = new_blip_count;
-    prev_trail_count = new_trail_count;
 
     // Range labels
     tft.setTextColor(pal->ring, pal->bg);
@@ -744,6 +703,123 @@ static void draw_radar() {
         char buf[8];
         snprintf(buf, sizeof(buf), "%d", (int)(RANGES[range_idx] * i / 3));
         tft.drawString(buf, RADAR_CX + 2, RADAR_CY - r + 2, 1);
+    }
+}
+
+static void draw_radar() {
+    if (radar_first_draw || radar_needs_full_redraw) {
+        // First frame: full clear, draw everything
+        tft.fillRect(0, RADAR_Y, LCD_H_RES, RADAR_H, pal->bg);
+        draw_radar_static();
+        radar_first_draw = false;
+        radar_needs_full_redraw = false;
+    } else {
+        // Selective erase: only erase previous frame's dynamic elements
+
+        // Erase old sweep line
+        if (prev_sweep_angle >= 0) {
+            float rad = prev_sweep_angle * M_PI / 180.0f;
+            int sx = RADAR_CX + (int)(RADAR_R * sinf(rad));
+            int sy = RADAR_CY - (int)(RADAR_R * cosf(rad));
+            tft.drawLine(RADAR_CX, RADAR_CY, sx, sy, pal->bg);
+        }
+
+        // Erase old trail lines
+        for (int i = 0; i < prev_trail_count; i++)
+            tft.drawLine(prev_trails[i].x1, prev_trails[i].y1,
+                         prev_trails[i].x2, prev_trails[i].y2, pal->bg);
+
+        // Erase old aircraft blips + labels (bounding boxes)
+        for (int i = 0; i < prev_blip_count; i++)
+            tft.fillRect(prev_blips[i].x, prev_blips[i].y,
+                         prev_blips[i].w, prev_blips[i].h, pal->bg);
+
+        // Repair static elements that may have been partially erased
+        draw_radar_static();
+    }
+
+    // ---- Draw new dynamic elements ----
+    prev_blip_count = 0;
+    prev_trail_count = 0;
+
+    // Sweep line
+    {
+        float rad = sweep_angle * M_PI / 180.0f;
+        int sx = RADAR_CX + (int)(RADAR_R * sinf(rad));
+        int sy = RADAR_CY - (int)(RADAR_R * cosf(rad));
+        tft.drawLine(RADAR_CX, RADAR_CY, sx, sy, pal->sweep);
+        prev_sweep_angle = sweep_angle;
+    }
+
+    // Aircraft
+    if (aircraft_list.lock(pdMS_TO_TICKS(50))) {
+        for (int i = 0; i < aircraft_list.count; i++) {
+            Aircraft &a = aircraft_list.aircraft[i];
+            if (!aircraft_passes_filter(a)) continue;
+
+            int px, py;
+            if (!latlon_to_radar(a.lat, a.lon, px, py)) continue;
+            int dx = px - RADAR_CX, dy = py - RADAR_CY;
+            if (dx * dx + dy * dy > RADAR_R * RADAR_R) continue;
+            if (compute_aircraft_opacity(a.stale_since, millis()) == 0) continue;
+
+            // Trail
+            if (a.trail_count > 1) {
+                for (int t = 1; t < a.trail_count; t++) {
+                    int tx1, ty1, tx2, ty2;
+                    if (latlon_to_radar(a.trail[t-1].lat, a.trail[t-1].lon, tx1, ty1) &&
+                        latlon_to_radar(a.trail[t].lat, a.trail[t].lon, tx2, ty2)) {
+                        tft.drawLine(tx1, ty1, tx2, ty2, pal->trail);
+                        if (prev_trail_count < MAX_PREV_TRAIL_SEGS)
+                            prev_trails[prev_trail_count++] = {tx1, ty1, tx2, ty2};
+                    }
+                }
+            }
+
+            // Blip
+            uint16_t fade_color = a.is_emergency ? pal->blip_emg :
+                                  a.is_military  ? pal->blip_mil  : pal->blip;
+            int blip_r = (a.is_military || a.is_emergency) ? 3 : 2;
+            tft.fillCircle(px, py, blip_r, fade_color);
+
+            // Heading line
+            if (a.heading > 0 && !a.on_ground) {
+                float hrad = a.heading * M_PI / 180.0f;
+                int hx = px + (int)(8 * sinf(hrad));
+                int hy = py - (int)(8 * cosf(hrad));
+                tft.drawLine(px, py, hx, hy, fade_color);
+            }
+
+            // Labels
+            tft.setTextColor(fade_color, pal->bg);
+            tft.setTextDatum(BL_DATUM);
+            if (a.callsign[0])
+                tft.drawString(a.callsign, px + 4, py - 2, 1);
+            char info[16];
+            if (valid_iata(a.origin) && valid_iata(a.dest))
+                snprintf(info, sizeof(info), "%.3s>%.3s", a.origin, a.dest);
+            else if (a.type_code[0])
+                snprintf(info, sizeof(info), "%s", a.type_code);
+            else
+                info[0] = '\0';
+            if (info[0]) {
+                tft.setTextDatum(TL_DATUM);
+                tft.drawString(info, px + 4, py + 2, 1);
+            }
+
+            // Save erase bounding box for next frame
+            if (prev_blip_count < MAX_PREV_BLIPS) {
+                int ex = px - 6, ey = py - 12;
+                int ew = 52, eh = 24;
+                if (ex < 0) { ew += ex; ex = 0; }
+                if (ey < RADAR_Y) { eh -= (RADAR_Y - ey); ey = RADAR_Y; }
+                if (ex + ew > LCD_H_RES) ew = LCD_H_RES - ex;
+                if (ey + eh > RADAR_Y + RADAR_H) eh = RADAR_Y + RADAR_H - ey;
+                if (ew > 0 && eh > 0)
+                    prev_blips[prev_blip_count++] = {ex, ey, ew, eh};
+            }
+        }
+        aircraft_list.unlock();
     }
 }
 
@@ -1472,11 +1548,13 @@ void loop() {
             saved_ty = ty;
             if (!long_press_fired && (now - touch_down_time) >= LONG_PRESS_MS) {
                 long_press_fired = true;
-                if (saved_tx >= TOUCH_LEFT_MAX && saved_tx <= TOUCH_RIGHT_MIN) {
+                bool in_center = (saved_tx >= TOUCH_LEFT_MAX && saved_tx <= TOUCH_RIGHT_MIN);
+                if (current_view == VIEW_SETTINGS) {
+                    // In settings, long-press works anywhere to adjust value
+                    settings_adjust_selected();
+                } else if (in_center) {
                     if (current_view == VIEW_STATS)
                         toggle_night_mode();
-                    else if (current_view == VIEW_SETTINGS)
-                        settings_adjust_selected();
                 }
             }
         }
@@ -1502,8 +1580,8 @@ void loop() {
     // Auto-cycle
     auto_cycle();
 
-    // Redraw at ~15fps
-    if (now - last_draw >= 66) {
+    // Redraw at ~10fps (sprite eliminates flicker)
+    if (now - last_draw >= 100) {
         last_draw = now;
 
         if (current_view == VIEW_LOADING) {
